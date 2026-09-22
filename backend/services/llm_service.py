@@ -147,9 +147,9 @@ Return ONLY valid JSON with the following structure:
 
 {{
     "category": "string",
-    "priority": "string",
+    "priority": "low | medium | high | critical",
     "summary": "string",
-    "sentiment": "string",
+    "sentiment": "positive | neutral | negative | urgent",
     "root_cause": "string",
     "recommended_actions": [
         "string"
@@ -163,17 +163,58 @@ Rules:
 3. Keep the summary concise.
 4. The root cause should be treated as a hypothesis.
 5. Recommended actions should be relevant to the issue.
+6. Priority MUST be lowercase.
+7. Sentiment MUST be lowercase.
+8. Priority MUST be one of:
+   low, medium, high, critical.
+9. Sentiment MUST be one of:
+   positive, neutral, negative, urgent.
 """
 
     result = generate_json_response(
-
         prompt=prompt,
-
         system_prompt=(
             "You are a support ticket analysis engine. "
-            "Return only valid JSON and do not invent facts."
+            "Return only valid JSON. "
+            "Always use lowercase values for priority "
+            "and sentiment."
         )
     )
+
+    # --------------------------------------------------------
+    # NORMALIZE LLM OUTPUT
+    # --------------------------------------------------------
+
+    priority = str(
+        result.get("priority", "medium")
+    ).strip().lower()
+
+    sentiment = str(
+        result.get("sentiment", "neutral")
+    ).strip().lower()
+
+    valid_priorities = {
+        "low",
+        "medium",
+        "high",
+        "critical"
+    }
+
+    valid_sentiments = {
+        "positive",
+        "neutral",
+        "negative",
+        "urgent"
+    }
+
+    if priority not in valid_priorities:
+        priority = "medium"
+
+    if sentiment not in valid_sentiments:
+        sentiment = "neutral"
+
+    result["priority"] = priority
+    result["sentiment"] = sentiment
 
     return TicketAnalysis(
         **result
