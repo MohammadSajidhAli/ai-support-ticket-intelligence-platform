@@ -2,40 +2,53 @@ import json
 from pathlib import Path
 
 import chromadb
-import ollama
 
 from sqlalchemy.orm import Session
 
 from database.database import SessionLocal
-
 from models.ticket import TicketDB
 
 from services.rag_service import (
     retrieve_documents,
-    rerank_documents
+    rerank_documents,
+    generate_embedding
 )
+
+
+# ============================================================
+# CONFIGURATION
+# ============================================================
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 CHROMA_PATH = BASE_DIR / "chroma_db"
-
-chroma_client = chromadb.PersistentClient(
-    path=CHROMA_PATH
-)
-
-BASE_DIR = Path(__file__).resolve().parent.parent
 
 OPERATIONAL_DATA_PATH = (
     BASE_DIR / "operational_data"
 )
 
 
-def search_logs(query: str = ""):
-    """
-    Search application logs for relevant information.
-    """
+# ============================================================
+# CHROMA
+# ============================================================
 
-    logs_file = OPERATIONAL_DATA_PATH / "logs.txt"
+chroma_client = chromadb.PersistentClient(
+    path=CHROMA_PATH
+)
+
+
+# ============================================================
+# TOOL: SEARCH LOGS
+# ============================================================
+
+def search_logs(
+    query: str = ""
+):
+
+    logs_file = (
+        OPERATIONAL_DATA_PATH
+        / "logs.txt"
+    )
 
     if not logs_file.exists():
         return []
@@ -65,6 +78,10 @@ def search_logs(query: str = ""):
     return matching_lines
 
 
+# ============================================================
+# TOOL: SERVICE STATUS
+# ============================================================
+
 def get_service_status():
 
     status_file = (
@@ -73,12 +90,20 @@ def get_service_status():
     )
 
     if not status_file.exists():
-        return "Service status information unavailable."
+
+        return (
+            "Service status information "
+            "unavailable."
+        )
 
     return status_file.read_text(
         encoding="utf-8"
     )
 
+
+# ============================================================
+# TOOL: DEPLOYMENT INFO
+# ============================================================
 
 def get_deployment_info():
 
@@ -88,30 +113,19 @@ def get_deployment_info():
     )
 
     if not deployment_file.exists():
-        return "Deployment information unavailable."
+
+        return (
+            "Deployment information "
+            "unavailable."
+        )
 
     return deployment_file.read_text(
         encoding="utf-8"
     )
 
-def generate_embedding(
-    text: str
-):
-
-    response = ollama.embed(
-
-        model="nomic-embed-text",
-
-        input=text
-    )
-
-    return response[
-        "embeddings"
-    ][0]
 
 # ============================================================
-# TOOL 1
-# SEARCH KNOWLEDGE BASE
+# TOOL: SEARCH KNOWLEDGE BASE
 # ============================================================
 
 def search_knowledge_base(
@@ -119,13 +133,18 @@ def search_knowledge_base(
 ):
 
     documents = retrieve_documents(
+
         query=query,
+
         top_k=5,
+
         distance_threshold=0.80
     )
 
     documents = rerank_documents(
+
         query=query,
+
         documents=documents
     )
 
@@ -137,9 +156,14 @@ def search_knowledge_base(
 
         results.append(
             {
-                "source": document["source"],
-                "content": document["content"],
-                "score": document["rerank_score"]
+                "source":
+                    document["source"],
+
+                "content":
+                    document["content"],
+
+                "score":
+                    document["rerank_score"]
             }
         )
 
@@ -147,8 +171,7 @@ def search_knowledge_base(
 
 
 # ============================================================
-# TOOL 2
-# GET TICKET
+# TOOL: GET TICKET
 # ============================================================
 
 def get_ticket(
@@ -170,20 +193,27 @@ def get_ticket(
         if ticket is None:
 
             return {
-                "error": "Ticket not found"
+                "error":
+                    "Ticket not found"
             }
 
         return {
-    "id": ticket.id,
 
-    "customer": ticket.customer,
+            "id":
+                ticket.id,
 
-    "issue": ticket.issue,
+            "customer":
+                ticket.customer,
 
-    "priority": ticket.priority,
+            "issue":
+                ticket.issue,
 
-    "status": ticket.status
-}
+            "priority":
+                ticket.priority,
+
+            "status":
+                ticket.status
+        }
 
     finally:
 
@@ -191,8 +221,7 @@ def get_ticket(
 
 
 # ============================================================
-# TOOL 3
-# SEARCH SIMILAR TICKETS
+# TOOL: SEARCH SIMILAR TICKETS
 # ============================================================
 
 def search_similar_tickets(
@@ -205,30 +234,23 @@ def search_similar_tickets(
 
     try:
 
-        # ====================================================
-        # GET TICKETS FROM DATABASE
-        # ====================================================
-
         tickets = (
             db.query(TicketDB)
             .all()
         )
 
-
-        # ====================================================
-        # GET TICKET VECTOR COLLECTION
-        # ====================================================
+        if not tickets:
+            return []
 
         ticket_collection = (
             chroma_client.get_or_create_collection(
-                name="support_tickets"
+                name="support_tickets_gemini"
             )
         )
 
-
-        # ====================================================
-        # CLEAR OLD VECTOR INDEX
-        # ====================================================
+        # ----------------------------------------------------
+        # CLEAR OLD INDEX
+        # ----------------------------------------------------
 
         existing = ticket_collection.get()
 
@@ -243,25 +265,33 @@ def search_similar_tickets(
                 ids=existing_ids
             )
 
-
-        # ====================================================
-        # INDEX CURRENT DATABASE TICKETS
-        # ====================================================
+        # ----------------------------------------------------
+        # INDEX CURRENT TICKETS
+        # ----------------------------------------------------
 
         for ticket in tickets:
 
             ticket_text = (
-                f"Customer: {ticket.customer}\n"
-                f"Issue: {ticket.issue}\n"
-                f"Priority: {ticket.priority}\n"
-                f"Status: {ticket.status}"
-            )
 
+                f"Customer: "
+                f"{ticket.customer}\n"
+
+                f"Issue: "
+                f"{ticket.issue}\n"
+
+                f"Priority: "
+                f"{ticket.priority}\n"
+
+                f"Status: "
+                f"{ticket.status}"
+            )
 
             embedding = generate_embedding(
-                ticket_text
-            )
 
+                ticket_text,
+
+                task_type="RETRIEVAL_DOCUMENT"
+            )
 
             ticket_collection.upsert(
 
@@ -294,31 +324,20 @@ def search_similar_tickets(
                 ]
             )
 
-
-        # ====================================================
-        # NO OTHER TICKETS
-        # ====================================================
-
-        if (
-            exclude_ticket_id is not None
-            and len(tickets) <= 1
-        ):
-
-            return []
-
-
-        # ====================================================
+        # ----------------------------------------------------
         # QUERY EMBEDDING
-        # ====================================================
+        # ----------------------------------------------------
 
         query_embedding = generate_embedding(
-            issue
+
+            issue,
+
+            task_type="RETRIEVAL_QUERY"
         )
 
-
-        # ====================================================
+        # ----------------------------------------------------
         # SEMANTIC SEARCH
-        # ====================================================
+        # ----------------------------------------------------
 
         results = ticket_collection.query(
 
@@ -331,7 +350,6 @@ def search_similar_tickets(
                 len(tickets)
             )
         )
-
 
         documents = results.get(
             "documents",
@@ -348,17 +366,18 @@ def search_similar_tickets(
             [[]]
         )[0]
 
-
         similar_tickets = []
 
-
-        # ====================================================
+        # ----------------------------------------------------
         # BUILD RESULTS
-        # ====================================================
+        # ----------------------------------------------------
 
         for document, metadata, distance in zip(
+
             documents,
+
             metadatas,
+
             distances
         ):
 
@@ -366,27 +385,25 @@ def search_similar_tickets(
                 "ticket_id"
             ]
 
-
-            # ----------------------------------------------
-            # Exclude current ticket
-            # ----------------------------------------------
-
             if (
-                exclude_ticket_id is not None
+
+                exclude_ticket_id
+                is not None
+
                 and
-                ticket_id == exclude_ticket_id
+
+                ticket_id
+                == exclude_ticket_id
+
             ):
 
                 continue
-
 
             similarity = 1 / (
                 1 + distance
             )
 
-
             similar_tickets.append(
-
                 {
                     "ticket_id":
                         ticket_id,
@@ -411,18 +428,20 @@ def search_similar_tickets(
                 }
             )
 
-
-            if len(similar_tickets) >= limit:
-
+            if (
+                len(similar_tickets)
+                >= limit
+            ):
                 break
-
 
         return similar_tickets
 
-
     finally:
 
-        db.close()# ============================================================
+        db.close()
+
+
+# ============================================================
 # TEST TOOLS
 # ============================================================
 
@@ -434,7 +453,9 @@ if __name__ == "__main__":
     print("=" * 60)
 
     print("\n")
-    print("TOOL 1: SEARCH KNOWLEDGE BASE")
+    print(
+        "TOOL 1: SEARCH KNOWLEDGE BASE"
+    )
 
     result = search_knowledge_base(
         "500 errors after deployment"
@@ -448,7 +469,9 @@ if __name__ == "__main__":
     )
 
     print("\n")
-    print("TOOL 2: GET TICKET")
+    print(
+        "TOOL 2: GET TICKET"
+    )
 
     result = get_ticket(1)
 
@@ -460,12 +483,17 @@ if __name__ == "__main__":
     )
 
     print("\n")
-    print("TOOL 3: SEARCH SIMILAR TICKETS")
+    print(
+        "TOOL 3: SEARCH SIMILAR TICKETS"
+    )
 
     result = search_similar_tickets(
-    issue="API returning 500 errors",
-    exclude_ticket_id=1
-)
+
+        issue=
+            "API returning 500 errors",
+
+        exclude_ticket_id=1
+    )
 
     print(
         json.dumps(

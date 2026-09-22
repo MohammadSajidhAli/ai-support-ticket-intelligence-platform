@@ -1,14 +1,14 @@
 import json
 from typing import Any
 
-import ollama
-
 from models.ticket import (
     EvidenceItem,
     TicketInvestigation,
 )
 
 from models.approval import ApprovalDecision
+
+from services.llm_service import generate_json_response
 
 from services.tools_service import (
     get_ticket,
@@ -24,11 +24,6 @@ from services.tools_service import (
 # CONFIGURATION
 # ============================================================
 
-LLM_MODEL = "llama3.2"
-
-# Maximum backend evidence tool executions.
-MAX_TOOL_CALLS = 8
-
 REQUIRED_INVESTIGATION_TOOLS = {
     "get_ticket",
     "search_knowledge_base",
@@ -37,137 +32,6 @@ REQUIRED_INVESTIGATION_TOOLS = {
     "get_service_status",
     "get_deployment_info",
 }
-
-
-# ============================================================
-# TOOL DEFINITIONS
-# ============================================================
-
-TOOLS = [
-
-    {
-        "type": "function",
-        "function": {
-            "name": "get_ticket",
-            "description": (
-                "Retrieve the raw customer support ticket "
-                "from the database using its ticket ID."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "ticket_id": {
-                        "type": "integer",
-                        "description": "The ID of the ticket.",
-                    }
-                },
-                "required": ["ticket_id"],
-            },
-        },
-    },
-
-    {
-        "type": "function",
-        "function": {
-            "name": "search_knowledge_base",
-            "description": (
-                "Search internal company documentation "
-                "for troubleshooting procedures, known "
-                "technical issues, and possible causes."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "Technical issue to investigate.",
-                    }
-                },
-                "required": ["query"],
-            },
-        },
-    },
-
-    {
-        "type": "function",
-        "function": {
-            "name": "search_similar_tickets",
-            "description": (
-                "Search historical support tickets for "
-                "similar customer issues."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "issue": {
-                        "type": "string",
-                        "description": "Description of the current issue.",
-                    },
-                    "limit": {
-                        "type": "integer",
-                        "description": "Maximum number of results.",
-                    },
-                    "exclude_ticket_id": {
-                        "type": "integer",
-                        "description": "Ticket ID to exclude.",
-                    },
-                },
-                "required": ["issue"],
-            },
-        },
-    },
-
-    {
-        "type": "function",
-        "function": {
-            "name": "search_logs",
-            "description": (
-                "Search operational application logs "
-                "for evidence related to the incident."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "Terms related to the incident.",
-                    }
-                },
-                "required": [],
-            },
-        },
-    },
-
-    {
-        "type": "function",
-        "function": {
-            "name": "get_service_status",
-            "description": (
-                "Retrieve the current status of production "
-                "services and infrastructure."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {},
-            },
-        },
-    },
-
-    {
-        "type": "function",
-        "function": {
-            "name": "get_deployment_info",
-            "description": (
-                "Retrieve recent deployment information "
-                "including release changes and observations."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {},
-            },
-        },
-    },
-]
 
 
 # ============================================================
@@ -185,101 +49,6 @@ def serialize_tool_result(result: Any) -> str:
 
     except Exception:
         return str(result)
-
-
-# ============================================================
-# TOOL CALL EXTRACTION
-# ============================================================
-
-def get_tool_calls(message: Any) -> list:
-
-    if message is None:
-        return []
-
-    if isinstance(message, dict):
-
-        return message.get(
-            "tool_calls",
-            [],
-        ) or []
-
-    return getattr(
-        message,
-        "tool_calls",
-        [],
-    ) or []
-
-
-def extract_tool_call(tool_call: Any):
-
-    if isinstance(tool_call, dict):
-
-        function = tool_call.get(
-            "function",
-            {},
-        )
-
-        name = function.get(
-            "name",
-        )
-
-        arguments = function.get(
-            "arguments",
-            {},
-        )
-
-    else:
-
-        function = getattr(
-            tool_call,
-            "function",
-            None,
-        )
-
-        if function is None:
-            raise ValueError(
-                "Invalid tool call returned by LLM."
-            )
-
-        name = getattr(
-            function,
-            "name",
-            None,
-        )
-
-        arguments = getattr(
-            function,
-            "arguments",
-            {},
-        )
-
-    if arguments is None:
-        arguments = {}
-
-    if isinstance(arguments, str):
-
-        try:
-            arguments = json.loads(arguments)
-
-        except json.JSONDecodeError:
-
-            raise ValueError(
-                f"Invalid JSON arguments for tool '{name}'."
-            )
-
-    if not isinstance(arguments, dict):
-
-        raise ValueError(
-            f"Tool arguments for '{name}' must be an object."
-        )
-
-    if not name:
-
-        raise ValueError(
-            "Tool name is missing."
-        )
-
-    return name, arguments
 
 
 # ============================================================
@@ -562,13 +331,13 @@ def get_missing_required_tools(
 def collect_required_evidence(
     ticket: dict,
     ticket_id: int,
-) -> tuple[dict, dict]:
+) -> tuple[set[str], dict]:
 
     """
     Collect all required evidence directly from backend tools.
 
-    IMPORTANT:
-    We intentionally do NOT call Ollama between every tool.
+    The backend deterministically executes every required
+    investigation tool before Gemini performs final reasoning.
 
     This prevents the LLM from repeatedly selecting tools that
     have already been executed.
@@ -777,7 +546,7 @@ def collect_required_evidence(
     )
 
     print(
-        "[AGENT] Proceeding to final reasoning."
+        "[AGENT] Proceeding to Gemini final reasoning."
     )
 
     return completed_tools, tool_results
@@ -799,133 +568,31 @@ def investigate_ticket(
     print("=" * 70)
 
     # ========================================================
-    # STEP 1 — INITIAL LLM CALL
+    # STEP 1 — RETRIEVE TICKET
     # ========================================================
-
-    initial_messages = [
-
-        {
-            "role": "system",
-            "content": """
-You are an AI production incident investigation agent.
-
-You must begin an investigation by retrieving the support
-ticket using get_ticket.
-
-Do not invent facts.
-
-Use backend evidence for the investigation.
-
-After retrieving the ticket, the backend will collect the
-required operational evidence.
-
-Your final conclusion will be generated from verified backend
-evidence only.
-""",
-        },
-
-        {
-            "role": "user",
-            "content": (
-                f"Investigate support ticket #{ticket_id}. "
-                f"Start by retrieving the ticket."
-            ),
-        },
-    ]
 
     print()
     print(
-        "[AGENT] Initial reasoning..."
+        "[AGENT] Retrieving ticket..."
     )
 
-    response = ollama.chat(
-
-        model=LLM_MODEL,
-
-        messages=initial_messages,
-
-        tools=TOOLS,
+    ticket = execute_tool(
+        "get_ticket",
+        {
+            "ticket_id": ticket_id,
+        },
     )
 
-    message = response.get(
-        "message",
-        {},
+    print()
+    print(
+        "[AGENT] Tool completed: get_ticket"
     )
 
-    tool_calls = get_tool_calls(
-        message
+    print(
+        serialize_tool_result(
+            ticket
+        )
     )
-
-    # ========================================================
-    # STEP 2 — RETRIEVE TICKET
-    # ========================================================
-
-    ticket = None
-
-    if tool_calls:
-
-        for tool_call in tool_calls:
-
-            tool_name, arguments = extract_tool_call(
-                tool_call
-            )
-
-            # We only need the ticket at this stage.
-            if tool_name == "get_ticket":
-
-                print()
-                print(
-                    "[AGENT] Tool selected: get_ticket"
-                )
-
-                print(
-                    "[AGENT] Arguments: "
-                    f"{json.dumps(arguments)}"
-                )
-
-                ticket = execute_tool(
-                    tool_name,
-                    arguments,
-                )
-
-                print()
-                print(
-                    "[AGENT] Tool completed: get_ticket"
-                )
-
-                print(
-                    serialize_tool_result(
-                        ticket
-                    )
-                )
-
-                break
-
-    # --------------------------------------------------------
-    # Fallback if LLM did not call get_ticket correctly.
-    # --------------------------------------------------------
-
-    if ticket is None:
-
-        print()
-        print(
-            "[GUARDRAIL] LLM did not retrieve ticket."
-        )
-
-        print(
-            "[GUARDRAIL] Executing get_ticket."
-        )
-
-        ticket = execute_tool(
-            "get_ticket",
-            {
-                "ticket_id": ticket_id,
-            },
-        )
-
-        print(
-            "[GUARDRAIL] get_ticket completed"
-        )
 
     if not isinstance(
         ticket,
@@ -937,7 +604,7 @@ evidence only.
         )
 
     # ========================================================
-    # STEP 3 — REQUIRED EVIDENCE COLLECTION
+    # STEP 2 — REQUIRED EVIDENCE COLLECTION
     # ========================================================
 
     completed_tools, tool_results = (
@@ -948,7 +615,7 @@ evidence only.
     )
 
     # ========================================================
-    # STEP 4 — VERIFY REQUIRED EVIDENCE
+    # STEP 3 — VERIFY REQUIRED EVIDENCE
     # ========================================================
 
     missing_tools = get_missing_required_tools(
@@ -963,7 +630,7 @@ evidence only.
         )
 
     # ========================================================
-    # STEP 5 — GET RESULTS
+    # STEP 4 — GET RESULTS
     # ========================================================
 
     def latest_result(
@@ -1020,7 +687,7 @@ evidence only.
         deployment_info = ""
 
     # ========================================================
-    # STEP 6 — BUILD VERIFIED EVIDENCE
+    # STEP 5 — BUILD VERIFIED EVIDENCE
     # ========================================================
 
     verified_evidence = build_verified_evidence(
@@ -1045,7 +712,7 @@ evidence only.
     )
 
     # ========================================================
-    # STEP 7 — FINAL LLM REASONING
+    # STEP 6 — FINAL GEMINI REASONING
     # ========================================================
 
     evidence_text = json.dumps(
@@ -1136,6 +803,7 @@ REASONING REQUIREMENTS
     - "configuration problem"
     - "server problem"
     - "database issue"
+
     unless the evidence cannot support anything more specific.
 
 14. Be specific about WHAT changed, WHAT failed,
@@ -1190,95 +858,23 @@ Return ONLY valid JSON.
 
     print()
     print(
-        "[AGENT] Generating final investigation..."
+        "[AGENT] Generating final investigation with Gemini..."
     )
 
-    final_response = ollama.chat(
+    data = generate_json_response(
 
-        model=LLM_MODEL,
+        prompt=final_prompt,
 
-        messages=[
-
-            {
-                "role": "system",
-                "content": (
-                    "You are a production incident "
-                    "investigation reasoning engine."
-                ),
-            },
-
-            {
-                "role": "user",
-                "content": final_prompt,
-            },
-        ],
-
-        format={
-
-            "type": "object",
-
-            "properties": {
-
-                "summary": {
-                    "type": "string",
-                },
-
-                "root_cause_hypothesis": {
-                    "type": "string",
-                },
-
-                "confidence": {
-                    "type": "number",
-                    "minimum": 0,
-                    "maximum": 1,
-                },
-
-                "recommended_actions": {
-
-                    "type": "array",
-
-                    "items": {
-                        "type": "string",
-                    },
-                },
-            },
-
-            "required": [
-                "summary",
-                "root_cause_hypothesis",
-                "confidence",
-                "recommended_actions",
-            ],
-        },
+        system_prompt=(
+            "You are a production incident "
+            "investigation reasoning engine. "
+            "Use only verified evidence. "
+            "Never invent facts."
+        ),
     )
 
     # ========================================================
-    # STEP 8 — PARSE FINAL RESPONSE
-    # ========================================================
-
-    content = (
-        final_response[
-            "message"
-        ][
-            "content"
-        ]
-    )
-
-    try:
-
-        data = json.loads(
-            content
-        )
-
-    except json.JSONDecodeError as error:
-
-        raise ValueError(
-            "LLM returned invalid JSON for "
-            f"final investigation: {error}"
-        )
-
-    # ========================================================
-    # STEP 9 — VALIDATE
+    # STEP 7 — VALIDATE GEMINI RESPONSE
     # ========================================================
 
     summary = data.get(
@@ -1303,7 +899,7 @@ Return ONLY valid JSON.
     ):
 
         raise ValueError(
-            "Invalid summary returned by LLM."
+            "Invalid summary returned by Gemini."
         )
 
     if not isinstance(
@@ -1312,7 +908,7 @@ Return ONLY valid JSON.
     ):
 
         raise ValueError(
-            "Invalid root cause hypothesis returned by LLM."
+            "Invalid root cause hypothesis returned by Gemini."
         )
 
     if not isinstance(
@@ -1321,7 +917,7 @@ Return ONLY valid JSON.
     ):
 
         raise ValueError(
-            "Invalid recommended actions returned by LLM."
+            "Invalid recommended actions returned by Gemini."
         )
 
     try:
@@ -1346,7 +942,7 @@ Return ONLY valid JSON.
     )
 
     # ========================================================
-    # STEP 10 — CREATE STRUCTURED INVESTIGATION
+    # STEP 8 — CREATE STRUCTURED INVESTIGATION
     # ========================================================
 
     investigation = TicketInvestigation(

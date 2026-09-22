@@ -11,38 +11,34 @@ services:
       - "8000:8000"
 
     environment:
-      OLLAMA_HOST: http://ollama:11434
+
       DATABASE_URL: sqlite:////app/data/tickets.db
+
       FRONTEND_URL: http://localhost:5173
+
       JWT_SECRET_KEY: ${JWT_SECRET_KEY}
+
       ACCESS_TOKEN_EXPIRE_MINUTES: ${ACCESS_TOKEN_EXPIRE_MINUTES:-60}
 
+      GEMINI_API_KEY: ${GEMINI_API_KEY}
+
+      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-3.6-flash}
+
+      GEMINI_EMBEDDING_MODEL: ${GEMINI_EMBEDDING_MODEL:-gemini-embedding-001}
+
     volumes:
+
       - backend_data:/app/data
+
       - chroma_data:/app/chroma_db
+
       - ./backend/operational_data:/app/operational_data
-
-    depends_on:
-      - ollama
-
-    restart: unless-stopped
-
-
-  ollama:
-    image: ollama/ollama:latest
-
-    container_name: ai-support-ollama
-
-    ports:
-      - "11434:11434"
-
-    volumes:
-      - ollama_data:/root/.ollama
 
     restart: unless-stopped
 
 
 volumes:
+
   backend_data:
+
   chroma_data:
-  ollama_data:

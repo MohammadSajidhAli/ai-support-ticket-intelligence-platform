@@ -1,181 +1,177 @@
 import json
 import os
+import time
+from typing import Any, Dict
 
-import ollama
-
-from models.ticket import TicketAnalysis
+from google import genai
 
 
-# ============================================================
-# OLLAMA CONFIGURATION
-# ============================================================
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
-OLLAMA_HOST = os.getenv(
-    "OLLAMA_HOST",
-    "http://localhost:11434"
+if not GEMINI_API_KEY:
+    raise RuntimeError(
+        "GEMINI_API_KEY environment variable is required."
+    )
+
+
+GEMINI_MODEL = os.getenv(
+    "GEMINI_MODEL",
+    "gemini-3.6-flash"
 )
 
-ollama_client = ollama.Client(
-    host=OLLAMA_HOST
+
+client = genai.Client(
+    api_key=GEMINI_API_KEY
 )
 
 
-# ============================================================
-# TICKET ANALYSIS
-# ============================================================
+MAX_RETRIES = 3
+
+
+def _generate_content(
+    prompt: str,
+    system_prompt: str | None = None,
+    response_mime_type: str | None = None,
+):
+    config = {}
+
+    if system_prompt:
+        config["system_instruction"] = system_prompt
+
+    if response_mime_type:
+        config["response_mime_type"] = response_mime_type
+
+    last_error = None
+
+    for attempt in range(MAX_RETRIES):
+
+        try:
+
+            response = client.models.generate_content(
+
+                model=GEMINI_MODEL,
+
+                contents=prompt,
+
+                config=config
+            )
+
+            if not response.text:
+
+                raise RuntimeError(
+                    "Gemini returned an empty response."
+                )
+
+            return response.text
+
+        except Exception as exc:
+
+            last_error = exc
+
+            if attempt == MAX_RETRIES - 1:
+                break
+
+            wait_seconds = 2 ** attempt
+
+            print(
+                f"[GEMINI] Request failed "
+                f"(attempt {attempt + 1}/{MAX_RETRIES}). "
+                f"Retrying in {wait_seconds}s..."
+            )
+
+            time.sleep(wait_seconds)
+
+    raise RuntimeError(
+        f"Gemini request failed after "
+        f"{MAX_RETRIES} attempts: "
+        f"{last_error}"
+    )
+
+
+def generate_response(
+    prompt: str,
+    system_prompt: str | None = None,
+) -> str:
+
+    return _generate_content(
+
+        prompt=prompt,
+
+        system_prompt=system_prompt
+    )
+
+
+def generate_json_response(
+    prompt: str,
+    system_prompt: str | None = None,
+) -> Dict[str, Any]:
+
+    response_text = _generate_content(
+
+        prompt=prompt,
+
+        system_prompt=system_prompt,
+
+        response_mime_type="application/json"
+    )
+
+    try:
+
+        return json.loads(
+            response_text
+        )
+
+    except json.JSONDecodeError as exc:
+
+        raise RuntimeError(
+            "Gemini returned invalid JSON: "
+            f"{response_text}"
+        ) from exc
+
 
 def analyze_ticket(
-    customer: str,
-    issue: str,
-    context: str = ""
-) -> TicketAnalysis:
+    ticket_data: dict
+) -> Dict[str, Any]:
 
     prompt = f"""
-You are an AI customer support analyst.
-
 Analyze the following customer support ticket.
 
-CUSTOMER:
-{customer}
+TICKET:
 
-ISSUE:
-{issue}
+{json.dumps(
+    ticket_data,
+    indent=2,
+    default=str
+)}
 
+Return ONLY valid JSON with the following structure:
 
-INTERNAL COMPANY KNOWLEDGE:
-{context}
+{{
+    "category": "string",
+    "priority": "string",
+    "summary": "string",
+    "sentiment": "string",
+    "root_cause": "string",
+    "recommended_actions": [
+        "string"
+    ]
+}}
 
+Rules:
 
-IMPORTANT RULES:
-
-1. Use the internal company knowledge when it is relevant.
-
-2. Do not invent company-specific information.
-
-3. The root cause must be presented as a hypothesis,
-   not as a confirmed fact, unless the ticket or knowledge
-   base clearly confirms it.
-
-4. Recommended actions must be based on the internal
-   company knowledge whenever possible.
-
-5. If the internal knowledge does not contain enough
-   information, say that more investigation is required.
-
-6. Keep the response concise and practical.
-
-7. Return only valid JSON.
-
-8. Do not include explanations outside the JSON.
-
-
-RETURN EXACTLY THESE FIELDS:
-
-category
-
-priority
-
-summary
-
-sentiment
-
-root_cause
-
-recommended_actions
-
-
-PRIORITY MUST BE ONE OF:
-
-low
-medium
-high
-critical
-
-
-SENTIMENT MUST BE ONE OF:
-
-positive
-neutral
-negative
-urgent
-
-
-recommended_actions MUST BE AN ARRAY OF STRINGS.
+1. Use only information present in the ticket.
+2. Do not invent technical facts.
+3. Keep the summary concise.
+4. The root cause should be treated as a hypothesis.
+5. Recommended actions should be relevant to the issue.
 """
 
-    response = ollama_client.chat(
+    return generate_json_response(
 
-        model="llama3.2",
+        prompt=prompt,
 
-        messages=[
-            {
-                "role": "user",
-                "content": prompt
-            }
-        ],
-
-        format={
-            "type": "object",
-
-            "properties": {
-
-                "category": {
-                    "type": "string"
-                },
-
-                "priority": {
-                    "type": "string"
-                },
-
-                "summary": {
-                    "type": "string"
-                },
-
-                "sentiment": {
-                    "type": "string"
-                },
-
-                "root_cause": {
-                    "type": "string"
-                },
-
-                "recommended_actions": {
-                    "type": "array",
-                    "items": {
-                        "type": "string"
-                    }
-                }
-            },
-
-            "required": [
-
-                "category",
-
-                "priority",
-
-                "summary",
-
-                "sentiment",
-
-                "root_cause",
-
-                "recommended_actions"
-            ]
-        }
+        system_prompt=(
+            "You are a support ticket analysis engine. "
+            "Return only valid JSON and do not invent facts."
+        )
     )
-
-    result = response[
-        "message"
-    ][
-        "content"
-    ]
-
-    data = json.loads(
-        result
-    )
-
-    validated_analysis = TicketAnalysis(
-        **data
-    )
-
-    return validated_analysis

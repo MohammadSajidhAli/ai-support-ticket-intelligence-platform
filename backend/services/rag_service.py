@@ -1,9 +1,11 @@
 from pathlib import Path
-
+import os
 import re
 
 import chromadb
-import ollama
+from google import genai
+# pyrefly: ignore [missing-import]
+from google.genai import types
 
 from services.llm_service import analyze_ticket
 
@@ -17,7 +19,29 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 KNOWLEDGE_BASE_PATH = BASE_DIR / "knowledge_base"
 CHROMA_PATH = BASE_DIR / "chroma_db"
 
-COLLECTION_NAME = "support_knowledge"
+# New collection name because the old collection contains
+# Ollama/nomic embeddings.
+COLLECTION_NAME = "support_knowledge_gemini"
+
+
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+
+if not GEMINI_API_KEY:
+    raise RuntimeError(
+        "GEMINI_API_KEY environment variable is required."
+    )
+
+GEMINI_EMBEDDING_MODEL = os.getenv(
+    "GEMINI_EMBEDDING_MODEL",
+    "gemini-embedding-001"
+)
+
+EMBEDDING_DIMENSION = 768
+
+
+gemini_client = genai.Client(
+    api_key=GEMINI_API_KEY
+)
 
 
 # ============================================================
@@ -40,6 +64,9 @@ collection = chroma_client.get_or_create_collection(
 def load_documents():
 
     documents = []
+
+    if not KNOWLEDGE_BASE_PATH.exists():
+        return documents
 
     for file_path in KNOWLEDGE_BASE_PATH.glob("*.txt"):
 
@@ -72,7 +99,6 @@ def chunk_text(
     chunks = []
 
     current_chunk = []
-
     current_length = 0
 
     for word in words:
@@ -84,12 +110,12 @@ def chunk_text(
             > chunk_size
         ):
 
-            chunks.append(
-                " ".join(current_chunk)
-            )
+            if current_chunk:
+                chunks.append(
+                    " ".join(current_chunk)
+                )
 
             overlap_words = []
-
             overlap_length = 0
 
             for previous_word in reversed(
@@ -114,7 +140,6 @@ def chunk_text(
                 )
 
             current_chunk = overlap_words
-
             current_length = overlap_length
 
         current_chunk.append(word)
@@ -159,9 +184,11 @@ def load_and_chunk_documents():
                         f"-{index}"
                     ),
 
-                    "source": document["source"],
+                    "source":
+                        document["source"],
 
-                    "content": chunk
+                    "content":
+                        chunk
                 }
             )
 
@@ -169,23 +196,41 @@ def load_and_chunk_documents():
 
 
 # ============================================================
-# GENERATE EMBEDDING
+# GENERATE GEMINI EMBEDDING
 # ============================================================
 
 def generate_embedding(
-    text: str
+    text: str,
+    task_type: str = "RETRIEVAL_QUERY"
 ):
 
-    response = ollama.embed(
+    response = gemini_client.models.embed_content(
 
-        model="nomic-embed-text",
+        model=GEMINI_EMBEDDING_MODEL,
 
-        input=text
+        contents=text,
+
+        config=types.EmbedContentConfig(
+
+            task_type=task_type,
+
+            output_dimensionality=EMBEDDING_DIMENSION
+        )
     )
 
-    return response[
-        "embeddings"
-    ][0]
+    if not response.embeddings:
+        raise RuntimeError(
+            "Gemini returned no embedding."
+        )
+
+    embedding = response.embeddings[0].values
+
+    if not embedding:
+        raise RuntimeError(
+            "Gemini returned an empty embedding."
+        )
+
+    return embedding
 
 
 # ============================================================
@@ -196,6 +241,16 @@ def index_documents():
 
     chunks = load_and_chunk_documents()
 
+    if not chunks:
+        print(
+            "No knowledge-base documents found."
+        )
+        return
+
+    print(
+        f"Found {len(chunks)} chunks to index."
+    )
+
     for chunk in chunks:
 
         print(
@@ -203,7 +258,8 @@ def index_documents():
         )
 
         embedding = generate_embedding(
-            chunk["content"]
+            chunk["content"],
+            task_type="RETRIEVAL_DOCUMENT"
         )
 
         collection.upsert(
@@ -223,7 +279,7 @@ def index_documents():
             metadatas=[
                 {
                     "source":
-                    chunk["source"]
+                        chunk["source"]
                 }
             ]
         )
@@ -243,24 +299,27 @@ def retrieve_documents(
     top_k: int = 3,
     distance_threshold: float = 0.80
 ):
-    """
-    Retrieve relevant documents from ChromaDB.
-
-    Lower distance = more similar.
-
-    Documents with a distance greater than the
-    threshold are considered weak matches and removed.
-    """
 
     query_embedding = generate_embedding(
-        query
+        query,
+        task_type="RETRIEVAL_QUERY"
     )
 
+    result_count = collection.count()
+
+    if result_count == 0:
+        return []
+
     results = collection.query(
+
         query_embeddings=[
             query_embedding
         ],
-        n_results=top_k
+
+        n_results=min(
+            top_k,
+            result_count
+        )
     )
 
     retrieved_documents = []
@@ -286,29 +345,30 @@ def retrieve_documents(
         distances
     ):
 
-        # Ignore weak matches
         if distance > distance_threshold:
             continue
 
         retrieved_documents.append(
             {
-                "content": document,
+                "content":
+                    document,
 
                 "source":
-                metadata["source"],
+                    metadata["source"],
 
                 "distance":
-                distance
+                    distance
             }
         )
 
     return retrieved_documents
 
 
+# ============================================================
+# TOKENIZE
+# ============================================================
+
 def tokenize(text: str):
-    """
-    Convert text into normalized words.
-    """
 
     return set(
         re.findall(
@@ -318,17 +378,14 @@ def tokenize(text: str):
     )
 
 
+# ============================================================
+# RERANK DOCUMENTS
+# ============================================================
+
 def rerank_documents(
     query: str,
     documents: list[dict]
 ):
-    """
-    Rerank retrieved documents using
-    lexical overlap between the query
-    and each document.
-
-    Higher score = more relevant.
-    """
 
     query_words = tokenize(query)
 
@@ -341,6 +398,7 @@ def rerank_documents(
         )
 
         if not query_words:
+
             lexical_score = 0.0
 
         else:
@@ -355,13 +413,10 @@ def rerank_documents(
                 / len(query_words)
             )
 
-        # Convert Chroma distance into
-        # a similarity-like score.
         semantic_score = 1 / (
             1 + document["distance"]
         )
 
-        # Combine semantic and lexical scores.
         final_score = (
             0.6 * semantic_score
             + 0.4 * lexical_score
@@ -372,32 +427,32 @@ def rerank_documents(
                 **document,
 
                 "lexical_score":
-                lexical_score,
+                    lexical_score,
 
                 "semantic_score":
-                semantic_score,
+                    semantic_score,
 
                 "rerank_score":
-                final_score
+                    final_score
             }
         )
 
-    # Highest score first
     reranked.sort(
         key=lambda item:
-        item["rerank_score"],
+            item["rerank_score"],
         reverse=True
     )
 
     return reranked
 
+
+# ============================================================
+# UNIQUE SOURCES
+# ============================================================
+
 def get_unique_sources(
     retrieved_documents
 ):
-    """
-    Return unique knowledge-base sources
-    while preserving retrieval order.
-    """
 
     seen = set()
 
@@ -407,18 +462,20 @@ def get_unique_sources(
 
         source = document["source"]
 
-        if source not in seen:
+        if source in seen:
+            continue
 
-            seen.add(source)
+        seen.add(source)
 
-            unique_sources.append(
-                {
-                    "source": source,
+        unique_sources.append(
+            {
+                "source":
+                    source,
 
-                    "distance":
+                "distance":
                     document["distance"]
-                }
-            )
+            }
+        )
 
     return unique_sources
 
@@ -463,16 +520,6 @@ def analyze_ticket_with_rag(
     issue: str
 ):
 
-    """
-    Retrieve, rerank and analyze
-    the ticket using RAG.
-    """
-
-    # --------------------------------------------------------
-    # STEP 1
-    # Retrieve candidate documents
-    # --------------------------------------------------------
-
     retrieved_documents = retrieve_documents(
 
         issue,
@@ -480,38 +527,18 @@ def analyze_ticket_with_rag(
         top_k=5,
 
         distance_threshold=0.80
-
     )
-
-
-    # --------------------------------------------------------
-    # STEP 2
-    # Rerank candidates
-    # --------------------------------------------------------
 
     reranked_documents = rerank_documents(
 
         issue,
 
         retrieved_documents
-
     )
-
-
-    # --------------------------------------------------------
-    # STEP 3
-    # Keep best results
-    # --------------------------------------------------------
 
     final_documents = (
         reranked_documents[:3]
     )
-
-
-    # --------------------------------------------------------
-    # STEP 4
-    # Build LLM context
-    # --------------------------------------------------------
 
     context_parts = []
 
@@ -529,27 +556,14 @@ def analyze_ticket_with_rag(
         context_parts
     )
 
-
-    # --------------------------------------------------------
-    # STEP 5
-    # Analyze with LLM
-    # --------------------------------------------------------
-
     analysis = analyze_ticket(
 
-        customer=customer,
-
-        issue=issue,
-
-        context=context
-
+        {
+            "customer": customer,
+            "issue": issue,
+            "knowledge_context": context
+        }
     )
-
-
-    # --------------------------------------------------------
-    # STEP 6
-    # Prepare sources
-    # --------------------------------------------------------
 
     sources = []
 
@@ -565,35 +579,27 @@ def analyze_ticket_with_rag(
         seen.add(source)
 
         sources.append(
-
             {
                 "source":
-                source,
+                    source,
 
                 "distance":
-                document["distance"],
+                    document["distance"],
 
                 "rerank_score":
-                document["rerank_score"]
+                    document["rerank_score"]
             }
-
         )
 
-
-    # --------------------------------------------------------
-    # STEP 7
-    # Return
-    # --------------------------------------------------------
-
     return {
-
         "analysis":
-        analysis,
+            analysis,
 
         "sources":
-        sources
-
+            sources
     }
+
+
 # ============================================================
 # TEST RAG PIPELINE
 # ============================================================
@@ -614,11 +620,8 @@ if __name__ == "__main__":
     )
 
     result = analyze_ticket_with_rag(
-
         customer,
-
         issue
-
     )
 
     print(
