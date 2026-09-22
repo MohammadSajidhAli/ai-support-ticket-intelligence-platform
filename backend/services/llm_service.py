@@ -4,7 +4,7 @@ import time
 from typing import Any, Dict
 
 from google import genai
-
+from models.ticket import TicketAnalysis
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
@@ -128,10 +128,9 @@ def generate_json_response(
             f"{response_text}"
         ) from exc
 
-
 def analyze_ticket(
     ticket_data: dict
-) -> Dict[str, Any]:
+) -> TicketAnalysis:
 
     prompt = f"""
 Analyze the following customer support ticket.
@@ -166,7 +165,7 @@ Rules:
 5. Recommended actions should be relevant to the issue.
 """
 
-    return generate_json_response(
+    result = generate_json_response(
 
         prompt=prompt,
 
@@ -174,4 +173,8 @@ Rules:
             "You are a support ticket analysis engine. "
             "Return only valid JSON and do not invent facts."
         )
+    )
+
+    return TicketAnalysis(
+        **result
     )
