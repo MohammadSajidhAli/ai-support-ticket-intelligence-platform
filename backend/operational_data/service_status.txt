@@ -1,0 +1,25 @@
+Service Status
+
+API Service:
+Status: degraded
+
+Database:
+Status: unhealthy
+
+Authentication Service:
+Status: healthy
+
+Deployment Service:
+Status: healthy
+
+Current API Error Rate:
+18.7%
+
+Normal API Error Rate:
+0.2%
+
+Database Connection Pool:
+Status: exhausted
+
+Last Health Check:
+2026-09-18 09:25:10

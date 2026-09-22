@@ -1,0 +1,20 @@
+Deployment Issues
+
+Production incidents can occur after a new application deployment.
+
+Common symptoms include:
+
+- Increased API errors
+- Increased latency
+- Failed health checks
+- Missing environment variables
+- Incorrect application configuration
+
+Troubleshooting steps:
+
+1. Check when the deployment occurred.
+2. Compare error rates before and after deployment.
+3. Review deployment logs.
+4. Verify environment variables.
+5. Compare the new version with the previous stable version.
+6. Roll back when the deployment is confirmed to be the cause.

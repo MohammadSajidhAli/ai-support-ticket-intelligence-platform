@@ -1,0 +1,19 @@
+Database Issues
+
+Common database problems include:
+
+- Connection failures
+- Connection pool exhaustion
+- Slow queries
+- Database timeouts
+- Incorrect credentials
+- Database service outages
+
+Troubleshooting steps:
+
+1. Verify database availability.
+2. Check database credentials.
+3. Check connection pool usage.
+4. Review slow query logs.
+5. Check database CPU and memory usage.
+6. Verify network connectivity between the application and database.

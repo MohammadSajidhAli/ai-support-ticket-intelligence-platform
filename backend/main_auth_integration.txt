@@ -1,0 +1,29 @@
+# Add these imports near the top of main.py:
+from auth.routes import router as auth_router
+from auth.dependencies import get_current_user, require_roles
+from models.user import UserDB
+
+# Add this after app = FastAPI(...):
+app.include_router(auth_router)
+
+# Then protect endpoints by adding one dependency parameter.
+#
+# Read-only example:
+# current_user: UserDB = Depends(get_current_user)
+#
+# Role-protected example:
+# current_user: UserDB = Depends(require_roles("admin", "support_agent"))
+#
+# Suggested mapping:
+# GET /tickets, GET /tickets/{ticket_id}, GET /tickets/{ticket_id}/evaluation
+#     -> get_current_user
+#
+# POST /tickets/{ticket_id}/investigate
+# POST /tickets/{ticket_id}/approve
+# POST /tickets/{ticket_id}/reject
+# POST /tickets/{ticket_id}/investigate-more
+# POST /tickets/{ticket_id}/resolve
+#     -> require_roles("admin", "support_agent")
+#
+# Admin-only future endpoints:
+#     -> require_roles("admin")

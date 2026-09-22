@@ -1,0 +1,27 @@
+API 500 Errors
+
+A 500 Internal Server Error indicates that the server encountered
+an unexpected condition while processing a request.
+
+Common causes include:
+
+- Database connection failures
+- Application exceptions
+- Invalid server configuration
+- Deployment problems
+
+Troubleshooting steps:
+
+1. Check application logs.
+2. Check database connectivity.
+3. Review recent deployments.
+4. Verify environment variables.
+5. Check service health.
+6. Roll back the latest deployment if the issue started immediately
+   after a deployment.
+
+For production incidents, persistent 500 errors should be treated
+as high priority.
+
+If the error started immediately after a deployment, compare the
+current release with the previous stable release.
